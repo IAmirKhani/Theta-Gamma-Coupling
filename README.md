@@ -1,1 +1,1 @@
-# Theta-Gamma-Copuling
+# Theta-Gamma-Coupling
