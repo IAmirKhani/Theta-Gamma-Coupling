@@ -17,23 +17,14 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 from scipy.io import loadmat
 from scipy.stats import entropy
+import os
+import re
 
 
 def extract_frequency_sampling(lfp, hypno):
-    len_lfp_2500 = len(lfp) // 60 // 2500
-    len_lfp_1000 = len(lfp) // 60 // 1000
-    len_hypno = len(hypno) // 60
+    fs = len(lfp)/len(hypno)
 
-    if len_hypno == len_lfp_2500:
-        fs = 2500
-        print(f'frequency sampling of the data is: {fs}')
-        return fs
-    elif len_hypno == len_lfp_1000:
-        fs = 1000
-        print(f'frequency sampling of the data is: {fs}')
-        return fs
-    else:
-        print('Please specify the frequency sampling of the data in get_data function')
+    return int(fs)
 
 
 def get_data(lfp_path, state_path):
@@ -273,7 +264,11 @@ def get_filtered_epoch_data(data, epochs, band=(0.1, 4), fs=2500):
 
 def get_cycles_with_conditions(cycles, conditions):
     C = copy.deepcopy(cycles)
-    C.pick_cycle_subset(conditions)
+    try:
+        C.pick_cycle_subset(conditions)
+    except ValueError as e:
+        print(f"No cycles satisfy the conditions: {e}")
+        return None
     return C
 
 
@@ -414,3 +409,47 @@ def abid(X, k, x, search_struct, offset=1):
     # Using another product to get the same values with less effort
     para_coss = normed_neighbors.T.dot(normed_neighbors)
     return k**2 / np.sum(np.square(para_coss))
+
+def extract_experiment_info(path_to_hpc):
+
+    path_parts = os.path.normpath(path_to_hpc).split(os.sep)
+
+    try:
+        idx_for_abdel = path_parts.index('for Abdel')
+    except ValueError:
+        raise ValueError("The path does not contain 'for Abdel' directory.")
+
+    dataset_type = path_parts[idx_for_abdel + 1]
+
+    rat_number = path_parts[idx_for_abdel + 2]
+
+    treatment_part = path_parts[idx_for_abdel + 3]
+    if '_' not in treatment_part and ' ' not in treatment_part:
+
+        treatment = treatment_part
+    else:
+
+        tokens = re.split(r'[_\-]', treatment_part)
+
+        tokens = [t for t in tokens if not re.match(r'Rat\d*|SD\d*|Rat|Ephys|OS', t, re.IGNORECASE)]
+
+        non_numeric_tokens = [t for t in tokens if not t.isdigit()]
+        if non_numeric_tokens:
+
+            treatment = non_numeric_tokens[-1]
+        else:
+            treatment = 'Unknown'
+
+    post_trial_folder = path_parts[-2]
+    post_trial_match = re.search(r'post_trial(\d+)', post_trial_folder, re.IGNORECASE)
+    if post_trial_match:
+        post_trial = post_trial_match.group(1)
+    else:
+        post_trial = 'Unknown'
+
+    return {
+        'dataset_type': dataset_type,
+        'rat_number': rat_number,
+        'treatment': treatment,
+        'post_trial': post_trial
+    }
