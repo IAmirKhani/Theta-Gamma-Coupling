@@ -80,7 +80,11 @@ def extract_imfs_by_pt_intervals(lfp, fs, interval, config, return_imfs_freqs=Fa
 
         rem_lfp.append(sig)
 
-        imf, mask_freq = sift.mask_sift(sig, **config)
+        try:
+            imf, mask_freq = sift.mask_sift(sig, **config)
+        except Exception as e:
+            print(f"EMD Sift failed: {e}. Skipping this interval.")
+            continue
         all_imfs.append(imf)
         all_masked_freqs.append(mask_freq)
 
@@ -453,3 +457,4 @@ def extract_experiment_info(path_to_hpc):
         'treatment': treatment,
         'post_trial': post_trial
     }
+
