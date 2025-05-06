@@ -7,6 +7,8 @@ import emd as emd
 import emd.sift as sift
 import emd.spectra as spectra
 import scipy.stats
+import pynapple as nap
+import sails
 
 from scipy.io import loadmat
 import numpy as np
@@ -19,6 +21,7 @@ from scipy.io import loadmat
 from scipy.stats import entropy
 import os
 import re
+from detect_pt import detect_phasic, preprocess, get_start_end
 
 
 def extract_frequency_sampling(lfp, hypno):
@@ -414,6 +417,7 @@ def abid(X, k, x, search_struct, offset=1):
     para_coss = normed_neighbors.T.dot(normed_neighbors)
     return k**2 / np.sum(np.square(para_coss))
 
+
 def extract_experiment_info(path_to_hpc):
 
     path_parts = os.path.normpath(path_to_hpc).split(os.sep)
@@ -435,7 +439,8 @@ def extract_experiment_info(path_to_hpc):
 
         tokens = re.split(r'[_\-]', treatment_part)
 
-        tokens = [t for t in tokens if not re.match(r'Rat\d*|SD\d*|Rat|Ephys|OS', t, re.IGNORECASE)]
+        tokens = [t for t in tokens if not re.match(
+            r'Rat\d*|SD\d*|Rat|Ephys|OS', t, re.IGNORECASE)]
 
         non_numeric_tokens = [t for t in tokens if not t.isdigit()]
         if non_numeric_tokens:
@@ -445,7 +450,8 @@ def extract_experiment_info(path_to_hpc):
             treatment = 'Unknown'
 
     post_trial_folder = path_parts[-2]
-    post_trial_match = re.search(r'post_trial(\d+)', post_trial_folder, re.IGNORECASE)
+    post_trial_match = re.search(
+        r'post_trial(\d+)', post_trial_folder, re.IGNORECASE)
     if post_trial_match:
         post_trial = post_trial_match.group(1)
     else:
@@ -458,3 +464,395 @@ def extract_experiment_info(path_to_hpc):
         'post_trial': post_trial
     }
 
+def extract_pt_intervals(lfpHPC, hypno, fs=2500):
+    targetFs = 500
+    n_down = fs / targetFs
+    start, end = get_start_end(hypno=hypno, sleep_state_id=5)
+    rem_interval = nap.IntervalSet(start=start, end=end)
+    fs = int(n_down * targetFs)
+    t = np.arange(0, len(lfpHPC) / fs, 1 / fs)
+    lfp = nap.TsdFrame(t=t, d=lfpHPC, columns=['HPC'])
+
+    # Detect phasic intervals
+    lfpHPC_down = preprocess(lfpHPC, n_down)
+    phREM = detect_phasic(lfpHPC_down, hypno, targetFs)
+
+    # Create phasic REM IntervalSet
+    start, end = [], []
+    for rem_idx in phREM:
+        for s, e in phREM[rem_idx]:
+            start.append(s / targetFs)
+            end.append(e / targetFs)
+    phasic_interval = nap.IntervalSet(start, end)
+
+    # Calculate tonic intervals
+    tonic_interval = rem_interval.set_diff(phasic_interval)
+    print(f'Number of detected Tonic intrevals:{len(tonic_interval)}')
+    # Apply a 100 ms duration threshold to tonic intervals
+    min_duration = 0.1  # 100 ms in seconds
+    durations = tonic_interval['end'] - tonic_interval['start']
+    valid_intervals = durations >= min_duration
+    tonic_interval = nap.IntervalSet(tonic_interval['start'][valid_intervals], tonic_interval['end'][valid_intervals])
+    print(f'Number of detected Tonic intrevals after threshold:{len(tonic_interval)}')
+    return phasic_interval, tonic_interval, lfp
+
+
+def get_cycle_data(imf5, fs=2500):
+    cycle_data = {"fs": None, 'theta_imf': None,
+                       "IP": None, "IF": None, "IP": None, "cycles": None}
+
+
+    # Get cycles using IP
+    IP, IF, IA = emd.spectra.frequency_transform(imf5, fs, 'hilbert')
+    C = emd.cycles.Cycles(IP)
+    cycles = get_cycles_with_metrics(C, imf5, IA, IF)
+
+    cycle_data['fs'] = fs
+    cycle_data['theta_imf'] = imf5
+    cycle_data['IP'] = IP
+    cycle_data['IF'] = IF
+    cycle_data['IA'] = IA
+    cycle_data['cycles'] = cycles
+    return cycle_data
+
+def extract_cycle_info(imfs, imf_frequencies):
+
+  all_FPPs = []
+  all_cycles_se =[]
+  all_cycles_ctrl = []
+
+  theta_range = [5, 12]
+  frequencies = np.arange(15, 141, 1)
+  angles=np.linspace(-180,180,19)
+  fs = 2500
+
+  for idx, imf in enumerate(imfs):
+    cycle_data = get_cycle_data(imf[:, 5], fs=2500)
+
+    amp_thresh = np.percentile(cycle_data['IA'], 25) # higher than 25th percentile of the data
+    lo_freq_duration = fs/5  # restrict the analysis to 5-12 Hz
+    hi_freq_duration = fs/17
+
+    conditions = ['is_good==1',
+                        f'duration_samples<{lo_freq_duration}',
+                        f'duration_samples>{hi_freq_duration}',
+                        f'max_amp>{amp_thresh}']
+
+    all_cycles = get_cycles_with_conditions(cycle_data['cycles'], conditions)
+
+    subset_cycles_df = all_cycles.get_metric_dataframe(subset=True)
+    subset_indices = subset_cycles_df['index'].values
+
+    ctrl = emd.cycles.get_control_points(imf[:, 5], cycle_data['cycles'], mode='augmented')
+    cycle_ctrls = get_cycle_ctrl(ctrl, subset_indices)
+    all_cycles_ctrl.append(cycle_ctrls)
+    all_cycles_inds = get_cycle_inds(all_cycles, subset_indices)
+    cycles_inds = arrange_cycle_inds(all_cycles_inds)
+
+    all_cycles_se.append(all_cycles_inds)
+
+    freqs = imf_frequencies[idx]
+    sub_theta, theta, supra_theta = tg_split(freqs, theta_range)
+    supra_theta_sig = np.sum(imf.T[supra_theta], axis=0)
+
+    # # Corrected Wavelet Transform Computation
+    raw_data=sails.wavelet.morlet(supra_theta_sig, freqs=frequencies, sample_rate=fs, ncycles=5,ret_mode='power', normalise=None)
+    supraPlot = scipy.stats.zscore(raw_data, axis=1)
+    FPP = bin_tf_to_fpp(cycles_inds, supraPlot, bin_count=19)
+    all_FPPs.append(FPP)
+
+  return all_cycles_ctrl, all_cycles_se, all_FPPs
+
+def extract_spectural_signiture(FPP):
+  smoothed_avg_fpp_all = []
+
+  # Process each cycle to extract its normalized smoothed average FPP
+  for fpp in FPP:
+      fpp = np.abs(fpp)
+      fpp_sum = np.sum(fpp)
+      normalized_fpp = fpp / fpp_sum if fpp_sum != 0 else fpp
+      avg_fpp = np.sum(normalized_fpp, axis=1)
+
+      # Smooth and normalize the avg_fpp
+      window_size = 5  # 5 Hz window
+      smoothed_avg_fpp = np.convolve(avg_fpp, np.ones(window_size)/window_size, mode='same')
+      smoothed_avg_fpp_norm = (smoothed_avg_fpp - np.min(smoothed_avg_fpp)) / (np.max(smoothed_avg_fpp) - np.min(smoothed_avg_fpp))
+
+      smoothed_avg_fpp_all.append(smoothed_avg_fpp_norm)
+
+  return smoothed_avg_fpp_all
+
+# version 1
+
+def prepare_data_for_sa(imfs, imf_frequencies):
+
+  all_FPPs = []
+
+  theta_range = [5, 12]
+  frequencies = np.arange(15, 141, 1)
+  angles=np.linspace(-180,180,19)
+  fs = 2500
+
+  for idx, imf in enumerate(imfs):
+    cycle_data = get_cycle_data(imf[:, 5], fs=2500)
+
+    amp_thresh = np.percentile(cycle_data['IA'], 25) # higher than 25th percentile of the data
+    lo_freq_duration = fs/5  # restrict the analysis to 5-12 Hz
+    hi_freq_duration = fs/12
+
+    conditions = ['is_good==1',
+                        f'duration_samples<{lo_freq_duration}',
+                        f'duration_samples>{hi_freq_duration}',
+                        f'max_amp>{amp_thresh}']
+    print(len(cycle_data['theta_imf']))
+    all_cycles = get_cycles_with_conditions(cycle_data['cycles'], conditions)
+    if all_cycles is None or all_cycles.chain_vect.size == 0:
+        print(f"No valid cycles found for the current interval. Skipping...")
+        continue
+    
+    # Check if any cycles satisfy the conditions - HERE CAN BE CHANGED
+    if all_cycles is None or all_cycles.chain_vect.size == 0:
+        print("No cycles satisfy the conditions.")
+        return pd.DataFrame(), pd.DataFrame(), []
+    
+    subset_cycles_df = all_cycles.get_metric_dataframe(subset=True)
+    subset_indices = subset_cycles_df['index'].values
+
+    all_cycles_inds = get_cycle_inds(all_cycles, subset_indices)
+    cycles_inds = arrange_cycle_inds(all_cycles_inds)
+
+    freqs = imf_frequencies[idx]
+    _, _, supra_theta = tg_split(freqs, theta_range)
+    supra_theta_sig = np.sum(imf.T[supra_theta], axis=0)
+
+    # # Corrected Wavelet Transform Computation
+    raw_data=sails.wavelet.morlet(supra_theta_sig, freqs=frequencies, sample_rate=fs, ncycles=5,ret_mode='power', normalise=None)
+    supraPlot = scipy.stats.zscore(raw_data, axis=1)
+    FPP = bin_tf_to_fpp(cycles_inds, supraPlot, bin_count=19)
+    all_FPPs.append(FPP)
+
+  return all_FPPs
+
+def extract_spectral_signatures_for_rat(rat_id):
+
+    # Define the base path to OS Basic datasets
+    base_path = '/Users/amir/Desktop/for Abdel/OS Basic'
+    treatments = ['CN', 'HC', 'OD', 'OR']
+    fs = 2500  # Sample frequency
+
+    # Initialize lists to collect all FPPs
+    all_phasic_FPPs = []
+    all_tonic_FPPs = []
+
+    rat_path = os.path.join(base_path, str(rat_id))
+
+    # Check if the specified rat folder exists
+    if not os.path.isdir(rat_path):
+        print(f"Rat folder {rat_id} does not exist.")
+        return None, None, None
+
+    # Loop over each treatment for the specified rat
+    counts = 0
+    for treatment in treatments:
+        treatment_path = os.path.join(rat_path, treatment)
+
+        # Check if the treatment folder exists
+        if not os.path.isdir(treatment_path):
+            print(f"Treatment folder '{treatment}' for Rat {rat_id} does not exist. Skipping...")
+            continue
+
+        # Detect all trial folders in the treatment directory and filter for Post_Trial2 to Post_Trial5
+        trial_folders = [
+            f for f in os.listdir(treatment_path)
+            if os.path.isdir(os.path.join(treatment_path, f)) and
+            any(f"Post_Trial{num}" in f for num in range(2, 6))
+        ]
+
+        for trial_folder in trial_folders:
+            trial_path = os.path.join(treatment_path, trial_folder)
+
+            # Search for LFP and state files in the trial folder
+            lfp_file = None
+            state_file = None
+
+            for file_name in os.listdir(trial_path):
+                if 'HPC' in file_name and file_name.endswith('.mat'):
+                    lfp_file = os.path.join(trial_path, file_name)
+                elif 'states' in file_name and file_name.endswith('.mat'):
+                    state_file = os.path.join(trial_path, file_name)
+
+            # Ensure both LFP and state files were found
+            if not lfp_file or not state_file:
+                print(f"Missing LFP or state file in {trial_path}. Skipping...")
+                continue
+
+            # Extract trial number from folder name (assuming format "Post_TrialX")
+            trial_number = int(trial_folder.split('Trial')[-1])
+
+            # Load data using your custom functions
+            try:
+                lfpHPC, hypno, _ = get_data(lfp_file, state_file)
+
+                # Extract phasic and tonic intervals, handling cases with no REM sleep
+                try:
+                    phasic_interval, tonic_interval, lfp_processed = extract_pt_intervals(lfpHPC, hypno, fs)
+                    
+                except ValueError as e:
+                    print(f"No REM sleep found in {trial_folder} for Rat {rat_id}, Treatment {treatment}. Filling with empty intervals.")
+                    phasic_interval, tonic_interval, lfp_processed = [[], [], []]
+
+                # Extract IMFs and frequencies for phasic and tonic intervals if intervals are not empty
+                if phasic_interval and tonic_interval:
+                    # Ensure 'config' is defined
+                    tonic_imfs, tonic_freqs, tonic_lpf = extract_imfs_by_pt_intervals(
+                        lfp_processed, fs, tonic_interval, config, return_imfs_freqs=True)
+                    phasic_imfs, phasic_freqs, phasic_lpf = extract_imfs_by_pt_intervals(
+                        lfp_processed, fs, phasic_interval, config, return_imfs_freqs=True)
+
+                    # Prepare FPP data for both phasic and tonic
+                    phasic_fpps = prepare_data_for_sa(
+                        phasic_imfs, phasic_freqs)
+                    tonic_fpps = prepare_data_for_sa(
+                        tonic_imfs, tonic_freqs)
+
+                    # Collect FPPs
+                    if phasic_fpps is not None:
+                        all_phasic_FPPs.extend(phasic_fpps)
+                    if tonic_fpps is not None:
+                        all_tonic_FPPs.extend(tonic_fpps)
+                else:
+                    print(f"No phasic or tonic intervals found in {trial_folder}. Skipping...")
+
+            except FileNotFoundError:
+                print(f"Data not found in {trial_path}. Skipping...")
+
+    return all_phasic_FPPs, all_tonic_FPPs
+
+def extract_and_flatten_signatures(fpps):
+    """Extracts and flattens spectral signatures from a list of FPPs."""
+    spectral_signatures = [extract_spectural_signiture(fpp) for fpp in fpps]
+    # Flatten the nested list of spectral signatures
+    flattened_signatures = np.array([ss for sublist in spectral_signatures for ss in sublist])
+    return flattened_signatures
+
+
+def extract_data_for_rat(rat_id, config):
+    # Define the base path to OS Basic datasets
+    base_path = '/Users/amir/Desktop/for Abdel/OS Basic'
+    fs = 2500  # Sample frequency
+
+    # Initialize empty DataFrames for concatenation across all recordings and trials for the specified rat
+    all_phasic_FPPs = []
+    all_tonic_FPPs = []
+
+    rat_path = os.path.join(base_path, str(rat_id))
+
+    # Check if the specified rat folder exists
+    if not os.path.isdir(rat_path):
+        print(f"Rat folder {rat_id} does not exist.")
+        return None, None
+
+    # List all recording folders in the rat directory
+    recording_folders = [
+        f for f in os.listdir(rat_path)
+        if os.path.isdir(os.path.join(rat_path, f))
+    ]
+
+    if not recording_folders:
+        print(f"No recording folders found for Rat {rat_id}.")
+        return None, None
+
+    # Loop over each recording folder
+    for recording_folder in recording_folders:
+        print(f"Processing recording folder: {recording_folder}")
+        recording_path = os.path.join(rat_path, recording_folder)
+
+        # Use regular expressions to parse the folder name
+        match = re.match(r'^Rat-OS-Ephys_(Rat\d+)_SD(\d+)_([\w-]+)_([\d-]+)$', recording_folder)
+        if not match:
+            print(f"Unexpected folder name format: {recording_folder}. Skipping...")
+            continue
+
+        rat_id_part = match.group(1)       # e.g., 'Rat6'
+        sd_number = match.group(2)         # e.g., '4'
+        condition = match.group(3)         # e.g., 'CON'
+        date_part = match.group(4)         # e.g., '22-02-2018'
+
+        rat_id_from_folder = ''.join(filter(str.isdigit, rat_id_part))
+
+        # Check if rat_id_from_folder matches rat_id
+        if rat_id_from_folder != str(rat_id):
+            print(f"Rat ID mismatch in folder {recording_folder}. Expected Rat{rat_id}, found Rat{rat_id_from_folder}. Skipping...")
+            continue
+
+        # Detect all trial folders and filter for post_trial2 to post_trial5, considering various folder name formats
+        trial_folders = [
+            f for f in os.listdir(recording_path)
+            if os.path.isdir(os.path.join(recording_path, f)) and
+            re.search(r'(?i)post[\-_]?trial[\-_]?([2-5])', f)
+        ]
+
+        if not trial_folders:
+            print(f"No trial folders found in {recording_folder}.")
+            continue
+
+        for trial_folder in trial_folders:
+            print(f"Processing trial folder: {trial_folder}")
+            trial_path = os.path.join(recording_path, trial_folder)
+
+            # Search for LFP and state files in the trial folder
+            lfp_file = None
+            state_file = None
+
+            for file_name in os.listdir(trial_path):
+                if 'HPC' in file_name and file_name.endswith('.mat'):
+                    lfp_file = os.path.join(trial_path, file_name)
+                elif 'states' in file_name and file_name.endswith('.mat'):
+                    state_file = os.path.join(trial_path, file_name)
+                elif 'States' in file_name and file_name.endswith('.mat'):
+                    state_file = os.path.join(trial_path, file_name)
+
+            # Ensure both LFP and state files were found
+            if not lfp_file or not state_file:
+                print(f"Missing LFP or state file in {trial_path}. Skipping...")
+                continue
+
+            # Extract trial number from folder name
+            trial_number_match = re.search(r'(?i)post[\-_]?trial[\-_]?([2-5])', trial_folder)
+            if trial_number_match:
+                trial_number = int(trial_number_match.group(1))
+            else:
+                print(f"Unable to extract trial number from folder name: {trial_folder}. Skipping...")
+                continue
+
+            # Load data using custom functions
+            try:
+                lfpHPC, hypno, _ = get_data(lfp_file, state_file)
+
+                # Extract phasic and tonic intervals, handling cases with no REM sleep
+                try:
+                    phasic_interval, tonic_interval, lfp = extract_pt_intervals(lfpHPC, hypno)
+                except ValueError as e:
+                    print(f"No REM sleep found in {trial_folder} for Rat {rat_id}, Condition {condition}. Filling with empty intervals.")
+                    phasic_interval, tonic_interval, lfp = [[], [], []]
+
+                # Extract IMFs and frequencies for phasic and tonic intervals if intervals are not empty
+                if phasic_interval and tonic_interval:
+                    # Assume 'config' is defined elsewhere in your code
+                    tonic_imfs, tonic_freqs, tonic_lpf = extract_imfs_by_pt_intervals(
+                        lfp, fs, tonic_interval, config, return_imfs_freqs=True)
+                    phasic_imfs, phasic_freqs, phasic_lpf = extract_imfs_by_pt_intervals(
+                        lfp, fs, phasic_interval, config, return_imfs_freqs=True)
+
+                    # Prepare UMAP data for both phasic and tonic
+                    phasic_FPPs = prepare_data_for_sa(phasic_imfs, phasic_freqs)
+                    tonic_FPPs = prepare_data_for_sa(tonic_imfs, tonic_freqs)
+
+                    # Concatenate into combined DataFrames
+                    all_phasic_FPPs.extend(phasic_FPPs)
+                    all_tonic_FPPs.extend(tonic_FPPs)
+
+            except FileNotFoundError:
+                print(f"Data not found in {trial_path}. Skipping...")
+
+    return all_phasic_FPPs, all_tonic_FPPs
