@@ -41,6 +41,14 @@ def extract_frequency_sampling(lfp, hypno):
 
 def get_data(lfp_path, state_path):
 
+    '''Load LFP and hypnogram data from .mat files, extract the sampling frequency, and trim the data if necessary.
+    Parameters:
+    lfp_path (str): The file path to the LFP data in .mat format.
+    state_path (str): The file path to the hypnogram data in .mat format.
+    Returns:
+    tuple: A tuple containing the LFP signal (numpy.ndarray), hypnogram data (numpy.ndarray), and the sampling frequency (int).
+    '''
+
     data = scipy.io.loadmat(lfp_path)
     states = scipy.io.loadmat(state_path)
 
