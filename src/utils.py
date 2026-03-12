@@ -26,6 +26,14 @@ from structure_index import compute_structure_index, draw_graph
 
 
 def extract_frequency_sampling(lfp, hypno):
+    '''
+    Extract the sampling frequency of the LFP signal based on the length of the LFP and hypnogram data.
+    Parameters:
+    lfp (numpy.ndarray): The LFP signal data.
+    hypno (numpy.ndarray): The hypnogram data corresponding to the LFP signal.
+    Returns:
+    int: The sampling frequency of the LFP signal.
+    '''
     fs = len(lfp)/len(hypno)
 
     return int(fs)
