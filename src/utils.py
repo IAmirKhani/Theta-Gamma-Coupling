@@ -69,6 +69,12 @@ def get_data(lfp_path, state_path):
 
 
 def plot_hypnogram(hypno):
+    '''Plot the hypnogram of sleep states over time.
+    Parameters:
+    hypno (numpy.ndarray): The hypnogram data representing sleep states over time.
+    Returns:
+    None: This function does not return any value but displays a plot of the hypnogram.
+    '''
     labels = {1: "Wake", 3: "NREM", 4: "Intermediate", 5: "REM"}
     plt.figure(figsize=(12, 6))
     time = np.arange(len(hypno)) / 60
@@ -81,12 +87,31 @@ def plot_hypnogram(hypno):
 
 
 def imf_freq(imf, sample_rate, mode='nht'):
+    '''Calculate the instantaneous frequency of the Intrinsic Mode Functions (IMFs) using the specified mode.
+    Parameters:
+    imf (numpy.ndarray): The array of Intrinsic Mode Functions (IMFs) obtained from the EMD decomposition.
+    sample_rate (int): The sampling frequency of the original signal from which the IMFs were derived.
+    mode (str, optional): The method to calculate the instantaneous frequency. Default is 'nht' (normalized Hilbert transform).
+    Returns:
+    numpy.ndarray: The array of instantaneous frequencies for each IMF.
+    '''
     _, IF, _ = emd.spectra.frequency_transform(imf, sample_rate, 'nht')
     freq_vec = np.mean(IF, axis=0)
     return freq_vec
 
 
 def extract_imfs_by_pt_intervals(lfp, fs, interval, config, return_imfs_freqs=False):
+
+    '''Extract Intrinsic Mode Functions (IMFs) from the LFP signal based on phasic and tonic REM intervals using the Masked Sift method.
+    Parameters:
+    lfp (numpy.ndarray): The Local Field Potential (LFP) signal from which to extract IMFs.
+    fs (int): The sampling frequency of the LFP signal.
+    interval (pynapple.IntervalSet): The intervals (phasic or tonic REM) during which to extract the IMFs.
+    config (emd.sift.SiftConfig): The configuration parameters for the Masked Sift method.
+    return_imfs_freqs (bool, optional): Whether to return the frequencies of the extracted IMFs. Default is False.
+    Returns:
+    list: A list of extracted IMFs for each interval. If return_imfs_freqs is True, also returns a list of frequencies for each IMF and the remaining LFP segments.
+    '''
 
     all_imfs = []
     all_imf_freqs = []
