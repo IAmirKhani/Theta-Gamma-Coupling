@@ -18,11 +18,30 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 from scipy.io import loadmat
 from scipy.stats import entropy
+from scipy.signal import butter, sosfiltfilt
 import os
 import re
 
 from detect_pt import *
 from structure_index import compute_structure_index, draw_graph
+
+
+def bandpass_filter(sig, fs, low, high, order=4):
+    '''
+    Apply a zero-phase Butterworth bandpass filter to a signal.
+
+    Parameters:
+    sig (numpy.ndarray): Input signal (1-D).
+    fs (int or float): Sampling frequency in Hz.
+    low (float): Lower cutoff frequency in Hz.
+    high (float): Upper cutoff frequency in Hz.
+    order (int, optional): Filter order. Default is 4.
+
+    Returns:
+    numpy.ndarray: The bandpass-filtered signal.
+    '''
+    sos = butter(order, [low, high], btype='bandpass', fs=fs, output='sos')
+    return sosfiltfilt(sos, sig)
 
 
 def extract_frequency_sampling(lfp, hypno):
@@ -39,12 +58,12 @@ def extract_frequency_sampling(lfp, hypno):
     return int(fs)
 
 
-def get_data(lfp_path, state_path):
-
+def get_data(lfp_path, state_path, type='hpc'):
     '''Load LFP and hypnogram data from .mat files, extract the sampling frequency, and trim the data if necessary.
     Parameters:
     lfp_path (str): The file path to the LFP data in .mat format.
     state_path (str): The file path to the hypnogram data in .mat format.
+    type (str, optional): The type of data to load ('hpc' or 'pfc'). Default is 'hpc'.
     Returns:
     tuple: A tuple containing the LFP signal (numpy.ndarray), hypnogram data (numpy.ndarray), and the sampling frequency (int).
     '''
@@ -52,7 +71,13 @@ def get_data(lfp_path, state_path):
     data = scipy.io.loadmat(lfp_path)
     states = scipy.io.loadmat(state_path)
 
-    lfp = np.squeeze(data['HPC'])
+    if type == 'hpc':
+        lfp = np.squeeze(data['HPC'])
+    elif type == 'pfc':
+        lfp = np.squeeze(data['PFC'])
+    else:
+        raise ValueError(f"Unknown type: {type}. Choose 'hpc' or 'pfc'.")
+
     hypno = np.squeeze(states['states'])
 
     fs = extract_frequency_sampling(lfp, hypno)
@@ -101,7 +126,6 @@ def imf_freq(imf, sample_rate, mode='nht'):
 
 
 def extract_imfs_by_pt_intervals(lfp, fs, interval, config, return_imfs_freqs=False):
-
     '''Extract Intrinsic Mode Functions (IMFs) from the LFP signal based on phasic and tonic REM intervals using the Masked Sift method.
     Parameters:
     lfp (numpy.ndarray): The Local Field Potential (LFP) signal from which to extract IMFs.
@@ -459,6 +483,7 @@ def abid(X, k, x, search_struct, offset=1):
     para_coss = normed_neighbors.T.dot(normed_neighbors)
     return k**2 / np.sum(np.square(para_coss))
 
+
 def extract_experiment_info(path_to_hpc):
 
     path_parts = os.path.normpath(path_to_hpc).split(os.sep)
@@ -480,7 +505,8 @@ def extract_experiment_info(path_to_hpc):
 
         tokens = re.split(r'[_\-]', treatment_part)
 
-        tokens = [t for t in tokens if not re.match(r'Rat\d*|SD\d*|Rat|Ephys|OS', t, re.IGNORECASE)]
+        tokens = [t for t in tokens if not re.match(
+            r'Rat\d*|SD\d*|Rat|Ephys|OS', t, re.IGNORECASE)]
 
         non_numeric_tokens = [t for t in tokens if not t.isdigit()]
         if non_numeric_tokens:
@@ -490,7 +516,8 @@ def extract_experiment_info(path_to_hpc):
             treatment = 'Unknown'
 
     post_trial_folder = path_parts[-2]
-    post_trial_match = re.search(r'post_trial(\d+)', post_trial_folder, re.IGNORECASE)
+    post_trial_match = re.search(
+        r'post_trial(\d+)', post_trial_folder, re.IGNORECASE)
     if post_trial_match:
         post_trial = post_trial_match.group(1)
     else:
@@ -532,14 +559,16 @@ def extract_pt_intervals(lfpHPC, hypno, fs=2500):
     min_duration = 0.1  # 100 ms in seconds
     durations = tonic_interval['end'] - tonic_interval['start']
     valid_intervals = durations >= min_duration
-    tonic_interval = nap.IntervalSet(tonic_interval['start'][valid_intervals], tonic_interval['end'][valid_intervals])
-    print(f'Number of detected Tonic intrevals after threshold:{len(tonic_interval)}')
+    tonic_interval = nap.IntervalSet(
+        tonic_interval['start'][valid_intervals], tonic_interval['end'][valid_intervals])
+    print(
+        f'Number of detected Tonic intrevals after threshold:{len(tonic_interval)}')
     return phasic_interval, tonic_interval, lfp
+
 
 def get_cycle_data(imf5, fs=2500):
     cycle_data = {"fs": None, 'theta_imf': None,
-                       "IP": None, "IF": None, "IP": None, "cycles": None}
-
+                  "IP": None, "IF": None, "IP": None, "cycles": None}
 
     # Get cycles using IP
     IP, IF, IA = emd.spectra.frequency_transform(imf5, fs, 'hilbert')
@@ -584,7 +613,7 @@ def extract_imfs_by_pt_intervals(lfp, fs, interval, config, return_imfs_freqs=Fa
         return all_imfs, all_imf_freqs, rem_lfp
     else:
         return all_imfs
-    
+
 
 # Rotation and Translation of dataset to align it to another dataset (template) based on a feature
 # Arguments:
@@ -613,15 +642,17 @@ def align_point_cloud(data, feature,
     }
 
     # Get bins from the data
-    SI, binLabel, overlapMat, sSI = compute_structure_index(data, np.array(feature), **params)
-    SI_temp, binLabel_temp, overlapMat_temp, sSI_temp = compute_structure_index(template_data, np.array(template_feature), **params)
+    SI, binLabel, overlapMat, sSI = compute_structure_index(
+        data, np.array(feature), **params)
+    SI_temp, binLabel_temp, overlapMat_temp, sSI_temp = compute_structure_index(
+        template_data, np.array(template_feature), **params)
 
     # Get centroids of bins (p and p'); these are the points that will be aligned
     p = []
     for i in range(params['n_bins']):
         p.append(np.mean(data[binLabel[0] == i], axis=0))
     p = np.array(p)
-    
+
     p_temp = []
     for i in range(params['n_bins']):
         p_temp.append(np.mean(template_data[binLabel_temp[0] == i], axis=0))
